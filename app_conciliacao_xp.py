@@ -32,6 +32,14 @@ h1,h2,h3 {letter-spacing:-.025em}
 .mw-kpi .kpi-note {color:#b2bfca;font-size:.76rem;margin-top:9px}
 .mw-kpi.accent {border-color:#857760;background:#252923}
 .mw-kpi.accent .kpi-value {color:#f5e8d5}
+.mw-kpi {height:100%; margin-bottom:0}
+.mw-kpi .kpi-value {font-size:clamp(1.05rem,1.55vw,1.6rem); white-space:normal}
+.stDownloadButton > button[kind="primary"] {
+    background:#5D73AF !important; color:#fff !important; border:1px solid #8195ca !important;
+    border-radius:11px !important; min-height:3.2rem !important;
+    font-size:1rem !important; font-weight:700 !important;
+}
+.stDownloadButton > button[kind="primary"]:hover {background:#7086bf !important; border-color:#a5b7df !important}
 </style>""", unsafe_allow_html=True)
 
 
@@ -142,7 +150,7 @@ def movement_files(uploads):
         out.append(part)
     if not out:
         return pd.DataFrame()
-    frame = pd.concat(out, ignore_index=True).dropna(subset=["Data referência", "Valor"])
+    frame = pd.concat(out, ignore_index=True).dropna(subset=["Data liquidação", "Valor"])
     # Não deduplicar por valor/descrição: operações legítimas podem ser idênticas.
     return frame.reset_index(drop=True)
 
@@ -197,17 +205,17 @@ def result_book(summary, details, pl, checks, notes, comparison=None):
 
 st.title("Conciliação de PL e Ganho Financeiro | XP")
 st.caption("M Wealth • Apuração mensal independente do relatório de performance da XP")
-st.info("**Rotina mensal:** atualize cinco PLs no Controle de Fechamento e importe o extrato completo. A posição consolidada detalhada só é necessária na implantação, se o PL inicial ainda não estiver no controle.")
-
-col_a, col_b = st.columns([1, 1])
+month_names = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+col_a, col_b = st.columns([1, 1], gap="medium")
 with col_a:
-    month_ref = st.date_input("Mês de referência", value=date(2026, 10, 1), format="DD/MM/YYYY")
-    year, month = month_ref.year, month_ref.month
-    end_dt = pd.Timestamp(year, month, calendar.monthrange(year, month)[1])
-    start_dt = pd.Timestamp(year, month, 1) - pd.Timedelta(days=1)
-    st.caption(f"Abertura: {start_dt:%d/%m/%Y} · Fechamento: {end_dt:%d/%m/%Y} (último dia calendário; PL do último dia útil aceito)")
+    month = st.selectbox("Mês de referência", options=list(range(1, 13)), index=9,
+                         format_func=lambda m: month_names[m - 1])
 with col_b:
-    flow_date_type = st.radio("Data para os fluxos externos", ["Data de referência", "Data de liquidação"], horizontal=True, help="Use a data que produz o lançamento efetivo no PL. Confira especialmente TEDs na virada do mês.")
+    year = st.number_input("Ano de referência", min_value=2020, max_value=2100, value=2026, step=1)
+year = int(year)
+end_dt = pd.Timestamp(year, month, calendar.monthrange(year, month)[1])
+start_dt = pd.Timestamp(year, month, 1) - pd.Timedelta(days=1)
+st.caption(f"Período: {start_dt:%d/%m/%Y} a {end_dt:%d/%m/%Y} · Fluxos considerados pela data efetiva de liquidação.")
 
 upload_pl = st.file_uploader("1. Controle de PL Fechamento (.xlsx)", type="xlsx", key="pl")
 upload_mov = st.file_uploader("2. Extrato XP (.xlsx) — um ou mais arquivos", type="xlsx", accept_multiple_files=True, key="extrato")
@@ -250,11 +258,8 @@ base["Status"] = base.apply(lambda r: "OK" if pd.notna(r["PL inicial"]) and pd.n
 m = movements.copy()
 # A seleção da interface usa "de", enquanto as colunas do extrato usam
 # nomes internos padronizados. Não acessar o DataFrame pela legenda da tela.
-DATE_COLUMNS = {
-    "Data de referência": "Data referência",
-    "Data de liquidação": "Data liquidação",
-}
-chosen_date_column = DATE_COLUMNS.get(flow_date_type)
+# Critério fixo: somente movimentações efetivamente liquidadas impactam o PL.
+chosen_date_column = "Data liquidação"
 if chosen_date_column not in m.columns:
     st.error(f"O extrato não possui a coluna de data esperada: {chosen_date_column}. Colunas lidas: {', '.join(map(str, m.columns))}")
     st.stop()
@@ -264,7 +269,10 @@ m = m.sort_values(["Conta", "Data apuração", "Descrição", "Valor"]).reset_in
 m.insert(0, "ID", range(1, len(m) + 1))
 m["Classificação"] = m["Descrição"].map(classify)
 
-st.subheader("1. Conferência das movimentações")
+# Reservar visualmente o resultado acima do editor, mas calculá-lo após a revisão.
+results_area = st.container()
+
+st.subheader("Conferência das movimentações")
 st.caption("Revise apenas as movimentações com 'Revisar' e qualquer TED/transferência que não represente um aporte ou retirada efetiva do patrimônio. Alterações valem para esta apuração e aparecem na memória exportada.")
 counts = m["Classificação"].value_counts()
 if counts.get("Revisar", 0):
@@ -274,11 +282,11 @@ with st.expander(f"Editar classificação de {len(m)} movimentações", expanded
                             hide_index=True, use_container_width=True, height=420,
                             disabled=["ID", "Conta", "Data apuração", "Descrição", "Valor"],
                             column_config={"Classificação": st.column_config.SelectboxColumn("Classificação", options=CATEGORIES, required=True)},
-                            key=f"ed_{year}_{month}_{flow_date_type}")
+                            key=f"ed_{year}_{month}")
     m["Classificação"] = m_edit["Classificação"].values
 
 if not len(m):
-    st.error("O extrato não contém movimentações no mês selecionado (conforme a data escolhida). Confira as datas e a integridade do arquivo.")
+    st.error("O extrato não contém movimentações liquidadas no mês selecionado. Confira as datas e a integridade do arquivo.")
     st.stop()
 
 if m["Classificação"].eq("Revisar").any():
@@ -332,56 +340,57 @@ summary["Ganho bruto (antes IR e gestão)"] = (summary["Ganho financeiro"]
                                              + summary["Taxa gestão (custo)"])
 summary["Retorno bruto Dietz (%)"] = (summary["Ganho bruto (antes IR e gestão)"] / summary["Capital ponderado"]).where(summary["Capital ponderado"] > 0) * 100
 
-st.subheader("2. Resultado mensal")
-st.caption("**Ganho líquido** = variação de PL ajustada pelos fluxos externos. **Ganho bruto ajustado** = ganho líquido + IRRF/IOF + taxa de gestão identificados no extrato. O cashback já está no PL, portanto não é somado novamente.")
-complete = summary["PL inicial"].notna() & summary["PL final"].notna()
-complete_data = summary.loc[complete]
-if (~complete).any():
-    st.warning("Faltam posições de abertura/fechamento para: " + ", ".join(summary.loc[~complete, "Conta"]) + ". O consolidado abaixo inclui apenas as contas completas.")
-if len(complete_data):
-    g = complete_data["Ganho financeiro"].sum()
-    g_bruto = complete_data["Ganho bruto (antes IR e gestão)"].sum()
-    start_sum = complete_data["PL inicial"].sum()
-    end_sum = complete_data["PL final"].sum()
-    flows = complete_data["Fluxo líquido"].sum()
-    weighted = complete_data["Fluxo ponderado"].sum()
-    rate = 100 * g/(start_sum + weighted) if (start_sum + weighted) > 0 else float("nan")
-    rate_bruto = 100 * g_bruto/(start_sum + weighted) if (start_sum + weighted) > 0 else float("nan")
-    cols = st.columns(4)
-    with cols[0]: kpi("PL inicial",fmt_brl(start_sum))
-    with cols[1]: kpi("PL final",fmt_brl(end_sum))
-    with cols[2]: kpi("Fluxo externo líquido",fmt_brl(flows))
-    with cols[3]: kpi("Ganho financeiro líquido",fmt_brl(g),accent=True)
-    cols2=st.columns(4)
-    with cols2[0]: kpi("Ganho bruto ajustado", fmt_brl(g_bruto), "Antes de IR e taxa de gestão")
-    with cols2[1]: kpi("IRRF + IOF identificados",fmt_brl(complete_data["IR + IOF (custo)"].sum()))
-    with cols2[2]: kpi("Taxas de gestão identificadas",fmt_brl(complete_data["Taxa gestão (custo)"].sum()))
-    with cols2[3]: kpi("Cashback contabilizado",fmt_brl(complete_data["Cashback lançado"].sum()),"Já incluído no ganho líquido")
-    st.caption(f"Rentabilidade Modified Dietz: **líquida {rate:.4f}%** · **bruta ajustada {rate_bruto:.4f}%** (aproximações; o cálculo bruto pressupõe custos lançados no período).")
+with results_area:
+    st.subheader("Resultado mensal")
+    st.caption("**Ganho líquido** = variação de PL ajustada pelos fluxos externos. **Ganho bruto ajustado** = ganho líquido + IRRF/IOF + taxa de gestão identificados no extrato. O cashback já está no PL, portanto não é somado novamente.")
+    complete = summary["PL inicial"].notna() & summary["PL final"].notna()
+    complete_data = summary.loc[complete]
+    if (~complete).any():
+        st.warning("Faltam posições de abertura/fechamento para: " + ", ".join(summary.loc[~complete, "Conta"]) + ". O consolidado abaixo inclui apenas as contas completas.")
+    if len(complete_data):
+        g = complete_data["Ganho financeiro"].sum()
+        g_bruto = complete_data["Ganho bruto (antes IR e gestão)"].sum()
+        start_sum = complete_data["PL inicial"].sum()
+        end_sum = complete_data["PL final"].sum()
+        flows = complete_data["Fluxo líquido"].sum()
+        weighted = complete_data["Fluxo ponderado"].sum()
+        rate = 100 * g/(start_sum + weighted) if (start_sum + weighted) > 0 else float("nan")
+        rate_bruto = 100 * g_bruto/(start_sum + weighted) if (start_sum + weighted) > 0 else float("nan")
+        cols = st.columns(4)
+        with cols[0]: kpi("PL inicial",fmt_brl(start_sum))
+        with cols[1]: kpi("PL final",fmt_brl(end_sum))
+        with cols[2]: kpi("Fluxo externo líquido",fmt_brl(flows))
+        with cols[3]: kpi("Ganho financeiro líquido",fmt_brl(g),accent=True)
+        cols2=st.columns(4)
+        with cols2[0]: kpi("Ganho bruto ajustado", fmt_brl(g_bruto), "Antes de IR e taxa de gestão")
+        with cols2[1]: kpi("IRRF + IOF identificados",fmt_brl(complete_data["IR + IOF (custo)"].sum()))
+        with cols2[2]: kpi("Taxas de gestão identificadas",fmt_brl(complete_data["Taxa gestão (custo)"].sum()))
+        with cols2[3]: kpi("Cashback contabilizado",fmt_brl(complete_data["Cashback lançado"].sum()),"Já incluído no ganho líquido")
+        st.caption(f"Rentabilidade Modified Dietz: **líquida {rate:.4f}%** · **bruta ajustada {rate_bruto:.4f}%** (aproximações; o cálculo bruto pressupõe custos lançados no período).")
 
-view_cols = ["Conta", "PL inicial", "PL final", "Fluxo líquido", "Ganho financeiro", "IR + IOF (custo)", "Taxa gestão (custo)", "Cashback lançado", "Ganho bruto (antes IR e gestão)", "Modified Dietz (%)", "Retorno bruto Dietz (%)", "Status"]
-view = summary[view_cols].copy()
-fmts={c:fmt_brl for c in ["PL inicial", "PL final", "Fluxo líquido", "Ganho financeiro", "IR + IOF (custo)", "Taxa gestão (custo)", "Cashback lançado", "Ganho bruto (antes IR e gestão)"]}
-fmts.update({c:(lambda v: f"{v:.4f}%" if pd.notna(v) else "—") for c in ["Modified Dietz (%)", "Retorno bruto Dietz (%)"]})
-st.dataframe(view.style.format(fmts), use_container_width=True, hide_index=True)
+    view_cols = ["Conta", "PL inicial", "PL final", "Fluxo líquido", "Ganho financeiro", "IR + IOF (custo)", "Taxa gestão (custo)", "Cashback lançado", "Ganho bruto (antes IR e gestão)", "Modified Dietz (%)", "Retorno bruto Dietz (%)", "Status"]
+    view = summary[view_cols].copy()
+    fmts={c:fmt_brl for c in ["PL inicial", "PL final", "Fluxo líquido", "Ganho financeiro", "IR + IOF (custo)", "Taxa gestão (custo)", "Cashback lançado", "Ganho bruto (antes IR e gestão)"]}
+    fmts.update({c:(lambda v: f"{v:.4f}%" if pd.notna(v) else "—") for c in ["Modified Dietz (%)", "Retorno bruto Dietz (%)"]})
+    st.dataframe(view.style.format(fmts), use_container_width=True, hide_index=True)
 
-st.subheader("3. Comparação com apuração XP / controle manual")
-st.caption("Referência opcional para conferência. A comparação não altera o resultado calculado. Digite o ganho anotado para cada conta e escolha o critério de comparação.")
-bench_defaults = {"9445242":339.27,"5166121":110215.15,"4163084":46839.88,"11370136":32549.55,"7983962":103587.85}
-bench = pd.DataFrame({"Conta":summary["Conta"],"Ganho de referência (R$)":[bench_defaults.get(acc, float("nan")) if year==2026 and month==10 else float("nan") for acc in summary["Conta"]]})
-bench_edit = st.data_editor(bench, hide_index=True, use_container_width=True,
-    disabled=["Conta"],column_config={"Ganho de referência (R$)":st.column_config.NumberColumn("Ganho de referência (R$)",format="%.2f")},
-    key=f"bench_{year}_{month}")
-criterion = st.radio("Comparar referência com",["Ganho bruto (antes IR e gestão)","Ganho financeiro"],horizontal=True,
-    format_func=lambda v:"Bruto (antes de IR e gestão)" if v.startswith("Ganho bruto") else "Líquido (após IR e gestão)")
-compare = summary[["Conta","Ganho financeiro","Ganho bruto (antes IR e gestão)","IR + IOF (custo)","Taxa gestão (custo)","Cashback lançado"]].merge(bench_edit,on="Conta",how="left")
-compare["Diferença (app - referência)"]=compare[criterion]-compare["Ganho de referência (R$)"]
-st.dataframe(compare.style.format({c:fmt_brl for c in compare.columns if c!="Conta"}),hide_index=True,use_container_width=True)
-if compare["Diferença (app - referência)"].abs().gt(1).any():
-    discrepant=compare.loc[compare["Diferença (app - referência)"].abs()>1,["Conta","Diferença (app - referência)"]]
-    st.warning("Existem diferenças superiores a R$ 1,00: " + "; ".join(f"conta {r['Conta']}: {fmt_brl(r['Diferença (app - referência)'])}" for _,r in discrepant.iterrows()) + ". Confira a natureza dos lançamentos, eventuais IRs não refletidos no extrato e os critérios de apuração XP.")
+    st.subheader("Comparação com apuração XP / controle manual")
+    st.caption("Referência opcional para conferência. A comparação não altera o resultado calculado. Digite o ganho anotado para cada conta e escolha o critério de comparação.")
+    bench_defaults = {"9445242":339.27,"5166121":159011.59,"4163084":46839.88,"11370136":32549.55,"7983962":103587.85}
+    bench = pd.DataFrame({"Conta":summary["Conta"],"Ganho de referência (R$)":[bench_defaults.get(acc, float("nan")) if year==2026 and month==10 else float("nan") for acc in summary["Conta"]]})
+    bench_edit = st.data_editor(bench, hide_index=True, use_container_width=True,
+        disabled=["Conta"],column_config={"Ganho de referência (R$)":st.column_config.NumberColumn("Ganho de referência (R$)",format="%.2f")},
+        key=f"bench_{year}_{month}")
+    criterion = st.radio("Comparar referência com",["Ganho bruto (antes IR e gestão)","Ganho financeiro"],horizontal=True,
+        format_func=lambda v:"Bruto (antes de IR e gestão)" if v.startswith("Ganho bruto") else "Líquido (após IR e gestão)")
+    compare = summary[["Conta","Ganho financeiro","Ganho bruto (antes IR e gestão)","IR + IOF (custo)","Taxa gestão (custo)","Cashback lançado"]].merge(bench_edit,on="Conta",how="left")
+    compare["Diferença (app - referência)"]=compare[criterion]-compare["Ganho de referência (R$)"]
+    st.dataframe(compare.style.format({c:fmt_brl for c in compare.columns if c!="Conta"}),hide_index=True,use_container_width=True)
+    if compare["Diferença (app - referência)"].abs().gt(1).any():
+        discrepant=compare.loc[compare["Diferença (app - referência)"].abs()>1,["Conta","Diferença (app - referência)"]]
+        st.warning("Existem diferenças superiores a R$ 1,00: " + "; ".join(f"conta {r['Conta']}: {fmt_brl(r['Diferença (app - referência)'])}" for _,r in discrepant.iterrows()) + ". Confira a natureza dos lançamentos, eventuais IRs não refletidos no extrato e os critérios de apuração XP.")
 
-st.subheader("4. Validações e exportação")
+st.subheader("Exportação")
 checks = pd.DataFrame([
     {"Verificação": "Contas sem PL completo", "Resultado": ", ".join(summary.loc[~complete,"Conta"]) or "Nenhuma"},
     {"Verificação": "Movimentações pendentes de classificação", "Resultado": str(int(m["Classificação"].eq("Revisar").sum()))},
@@ -389,19 +398,19 @@ checks = pd.DataFrame([
     {"Verificação": "Extrato: 1ª data de referência", "Resultado": str(movements["Data referência"].min().date())},
     {"Verificação": "Extrato: última data de referência", "Resultado": str(movements["Data referência"].max().date())},
     {"Verificação": "Extrato: última data de liquidação", "Resultado": str(movements["Data liquidação"].max().date())},
-    {"Verificação": "Data usada para fluxos", "Resultado": flow_date_type},
+    {"Verificação": "Data usada para fluxos", "Resultado": "Data de liquidação"},
     {"Verificação": "Ganho consolidado = PL final - PL inicial - fluxos", "Resultado": fmt_brl(complete_data["Ganho financeiro"].sum())},
     {"Verificação": "Ganho bruto = líquido + impostos + taxa gestão", "Resultado": fmt_brl(complete_data["Ganho bruto (antes IR e gestão)"].sum())},
     {"Verificação": "Cashback (já incluso no ganho)", "Resultado": fmt_brl(complete_data["Cashback lançado"].sum())},
 ])
 
-last_mov_day = m["Data apuração"].max()
-if last_mov_day < last_bday:
-    st.warning("A última movimentação disponível antecede o fechamento. Isso não prova que há extrato incompleto, mas é importante confirmar a cobertura até o fim do mês.")
-if last_bday != end_dt:
-    st.caption(f"Fechamento financeiro aceito em {last_bday:%d/%m/%Y}; os pesos Modified Dietz usam o encerramento calendário de {end_dt:%d/%m/%Y}. Se necessário, ajuste o critério no código para combinar com o padrão de sua instituição.")
-
-st.dataframe(checks, use_container_width=True, hide_index=True)
+with st.expander("Validações e conferências da apuração", expanded=False):
+    last_mov_day = m["Data apuração"].max()
+    if last_mov_day < last_bday:
+        st.warning("A última movimentação disponível antecede o fechamento. Isso não prova que há extrato incompleto, mas é importante confirmar a cobertura até o fim do mês.")
+    if last_bday != end_dt:
+        st.caption(f"PL de fechamento aceito em {last_bday:%d/%m/%Y}. Os pesos Dietz usam o encerramento de {end_dt:%d/%m/%Y}.")
+    st.dataframe(checks, use_container_width=True, hide_index=True)
 notes = pd.DataFrame({"Metodologia / alertas": [
     "Ganho = PL final - PL inicial - soma dos fluxos externos assinados (positivo=aporte; negativo=retirada).",
     "Modified Dietz = ganho / [PL inicial + soma(fluxo externo * (dias até fim do mês / dias do período))].",
@@ -435,9 +444,6 @@ if len(complete_data):
     }
     export_view = pd.concat([export_view, pd.DataFrame([consolidated_row])], ignore_index=True)
 out = result_book(export_view, m, pl.sort_values(["Data", "Conta"]), checks, notes, compare)
-st.download_button("⬇️ Baixar apuração consolidada e memória de cálculo (.xlsx)",
+st.download_button("📥 BAIXAR RESULTADO CONSOLIDADO + MEMÓRIA DE CÁLCULO (.XLSX)",
                    data=out, file_name=f"conciliacao_xp_{year}_{month:02d}.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
-
-with st.expander("Próximos fechamentos: rotina mínima"):
-    st.markdown("""1. No **Controle de PL**, acrescente uma linha por conta com data-base e PL do fechamento (cinco linhas por mês). Não precisa de PL diário.\n2. Exporte o **extrato completo do mês**, incluindo todos os fluxos externos.\n3. Selecione o mês, importe os arquivos, revise as transferências e baixe a memória.\n4. Guarde o mesmo Controle de PL histórico: o fechamento anterior vira a abertura do mês seguinte.""")
