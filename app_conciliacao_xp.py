@@ -228,7 +228,17 @@ base = pd.DataFrame({"Conta": accounts}).merge(opening, on="Conta", how="left").
 base["Status"] = base.apply(lambda r: "OK" if pd.notna(r["PL inicial"]) and pd.notna(r["PL final"]) else "PL inicial/final ausente", axis=1)
 
 m = movements.copy()
-m["Data apuração"] = m[flow_date_type]
+# A seleção da interface usa "de", enquanto as colunas do extrato usam
+# nomes internos padronizados. Não acessar o DataFrame pela legenda da tela.
+DATE_COLUMNS = {
+    "Data de referência": "Data referência",
+    "Data de liquidação": "Data liquidação",
+}
+chosen_date_column = DATE_COLUMNS.get(flow_date_type)
+if chosen_date_column not in m.columns:
+    st.error(f"O extrato não possui a coluna de data esperada: {chosen_date_column}. Colunas lidas: {', '.join(map(str, m.columns))}")
+    st.stop()
+m["Data apuração"] = m[chosen_date_column]
 m = m[(m["Data apuração"] >= start_dt + pd.Timedelta(days=1)) & (m["Data apuração"] <= end_dt)].copy()
 m = m.sort_values(["Conta", "Data apuração", "Descrição", "Valor"]).reset_index(drop=True)
 m.insert(0, "ID", range(1, len(m) + 1))
