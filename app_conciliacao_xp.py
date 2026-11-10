@@ -21,11 +21,28 @@ import streamlit as st
 st.set_page_config(page_title="Conciliação XP | M Wealth", layout="wide", page_icon="📊")
 
 st.markdown("""<style>
-.block-container {max-width: 1450px; padding-top: 1.8rem}
-[data-testid="stMetric"] {background:#f4f7fa;border:1px solid #e2e9f0;border-radius:12px;padding:16px}
-[data-testid="stMetricLabel"] {color:#38556b}
-h1,h2,h3 {color:#143c55}
+.block-container {max-width: 1480px; padding-top: 1.7rem}
+:root {--mw:#DCC9B1}
+h1,h2,h3 {letter-spacing:-.025em}
+.mw-kpi {background:#192532; border:1px solid #344355; border-radius:14px;
+         padding:16px 17px; min-height:112px; box-sizing:border-box; margin-bottom:8px}
+.mw-kpi .kpi-label {color:#cbd4df;font-size:.83rem;line-height:1.4;margin-bottom:12px}
+.mw-kpi .kpi-value {color:#fff;font-size:clamp(1.18rem,1.9vw,1.75rem);
+                   font-weight:750;line-height:1.2;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.mw-kpi .kpi-note {color:#b2bfca;font-size:.76rem;margin-top:9px}
+.mw-kpi.accent {border-color:#857760;background:#252923}
+.mw-kpi.accent .kpi-value {color:#f5e8d5}
 </style>""", unsafe_allow_html=True)
+
+
+def kpi(label, value, note="", accent=False):
+    from html import escape
+    cl = " accent" if accent else ""
+    note_html = f'<div class="kpi-note">{escape(note)}</div>' if note else ""
+    st.markdown(f'<div class="mw-kpi{cl}"><div class="kpi-label">{escape(label)}</div>'
+                f'<div class="kpi-value">{escape(value)}</div>{note_html}</div>',
+                unsafe_allow_html=True)
+
 
 
 def normalize(value: object) -> str:
@@ -157,11 +174,14 @@ def fmt_brl(n):
     return "R$ " + f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-def result_book(summary, details, pl, checks, notes):
+def result_book(summary, details, pl, checks, notes, comparison=None):
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="xlsxwriter", datetime_format="dd/mm/yyyy") as writer:
-        for name, df in [("Resultado por conta", summary), ("Memória movimentações", details),
-                         ("Controle PL", pl), ("Conferências", checks), ("Metodologia", notes)]:
+        sheets = [("Resultado por conta", summary), ("Memória movimentações", details),
+                  ("Controle PL", pl), ("Conferências", checks), ("Metodologia", notes)]
+        if comparison is not None:
+            sheets.insert(1, ("Comparativo referência", comparison))
+        for name, df in sheets:
             df.to_excel(writer, sheet_name=name, index=False)
             ws = writer.sheets[name]
             wb = writer.book
@@ -283,29 +303,85 @@ summary["Capital ponderado"] = summary["PL inicial"] + summary["Fluxo ponderado"
 summary["Modified Dietz (%)"] = (summary["Ganho financeiro"] / summary["Capital ponderado"]).where(summary["Capital ponderado"] > 0) * 100
 summary.loc[summary["Capital ponderado"] <= 0, "Status"] = "Base Dietz inválida"
 
+# Lançamentos que influenciam o ganho patrimonial, mas NÃO são fluxos externos.
+# Valores sinalizados no extrato: IRRF e taxas são negativos, cashback é positivo.
+desc_upper = m["Descrição"].map(normalize)
+m["Natureza econômica"] = "Demais movimentos / operações internas"
+m.loc[desc_upper.str.contains("IRRF|IMPOSTO DE RENDA", regex=True), "Natureza econômica"] = "IRRF"
+m.loc[desc_upper.str.contains("IOF", regex=True), "Natureza econômica"] = "IOF"
+m.loc[desc_upper.str.contains("TAXA GEST|TAXA DE GEST", regex=True), "Natureza econômica"] = "Taxa de gestão"
+m.loc[desc_upper.str.contains("DEVOLUCAO TX|CASHBACK|DEVOLUCAO DE TAXA", regex=True), "Natureza econômica"] = "Cashback / devolução de distribuição"
+m.loc[m["Classificação"].isin(["Aporte externo", "Retirada externa"]), "Natureza econômica"] = "Fluxo externo"
+
+recon = m.pivot_table(index="Conta", columns="Natureza econômica", values="Valor", aggfunc="sum", fill_value=0)
+for cat in ["IRRF", "IOF", "Taxa de gestão", "Cashback / devolução de distribuição"]:
+    if cat not in recon.columns:
+        recon[cat] = 0.0
+recon = recon[["IRRF", "IOF", "Taxa de gestão", "Cashback / devolução de distribuição"]].reset_index()
+recon.columns = ["Conta", "IRRF lançado", "IOF lançado", "Taxa gestão lançada", "Cashback lançado"]
+summary = summary.merge(recon, on="Conta", how="left")
+for cat in recon.columns[1:]:
+    summary[cat] = summary[cat].fillna(0.0)
+# O PL final já inclui os efeitos dos impostos/taxas/cashbacks contabilizados.
+# Para reconstruir o ganho ANTES de IR e taxas, adicionamos de volta os desembolsos.
+# Cashback NÃO é somado outra vez: já está incluído na variação patrimonial.
+summary["IR + IOF (custo)"] = -(summary["IRRF lançado"] + summary["IOF lançado"])
+summary["Taxa gestão (custo)"] = -summary["Taxa gestão lançada"]
+summary["Ganho bruto (antes IR e gestão)"] = (summary["Ganho financeiro"]
+                                             + summary["IR + IOF (custo)"]
+                                             + summary["Taxa gestão (custo)"])
+summary["Retorno bruto Dietz (%)"] = (summary["Ganho bruto (antes IR e gestão)"] / summary["Capital ponderado"]).where(summary["Capital ponderado"] > 0) * 100
+
 st.subheader("2. Resultado mensal")
+st.caption("**Ganho líquido** = variação de PL ajustada pelos fluxos externos. **Ganho bruto ajustado** = ganho líquido + IRRF/IOF + taxa de gestão identificados no extrato. O cashback já está no PL, portanto não é somado novamente.")
 complete = summary["PL inicial"].notna() & summary["PL final"].notna()
 complete_data = summary.loc[complete]
 if (~complete).any():
-    st.warning("Faltam posições de abertura/fechamento para: " + ", ".join(summary.loc[~complete, "Conta"]) + ". O consolidado abaixo inclui apenas as contas completas e não é o consolidado integral.")
+    st.warning("Faltam posições de abertura/fechamento para: " + ", ".join(summary.loc[~complete, "Conta"]) + ". O consolidado abaixo inclui apenas as contas completas.")
 if len(complete_data):
     g = complete_data["Ganho financeiro"].sum()
+    g_bruto = complete_data["Ganho bruto (antes IR e gestão)"].sum()
     start_sum = complete_data["PL inicial"].sum()
     end_sum = complete_data["PL final"].sum()
     flows = complete_data["Fluxo líquido"].sum()
     weighted = complete_data["Fluxo ponderado"].sum()
     rate = 100 * g/(start_sum + weighted) if (start_sum + weighted) > 0 else float("nan")
-    a,b,c,d = st.columns(4)
-    a.metric("PL inicial", fmt_brl(start_sum))
-    b.metric("PL final", fmt_brl(end_sum))
-    c.metric("Fluxo externo líquido", fmt_brl(flows))
-    d.metric("Ganho financeiro", fmt_brl(g))
-    st.metric("Rentabilidade consolidada · Modified Dietz", f"{rate:.4f}%" if pd.notna(rate) else "Indisponível")
+    rate_bruto = 100 * g_bruto/(start_sum + weighted) if (start_sum + weighted) > 0 else float("nan")
+    cols = st.columns(4)
+    with cols[0]: kpi("PL inicial",fmt_brl(start_sum))
+    with cols[1]: kpi("PL final",fmt_brl(end_sum))
+    with cols[2]: kpi("Fluxo externo líquido",fmt_brl(flows))
+    with cols[3]: kpi("Ganho financeiro líquido",fmt_brl(g),accent=True)
+    cols2=st.columns(4)
+    with cols2[0]: kpi("Ganho bruto ajustado", fmt_brl(g_bruto), "Antes de IR e taxa de gestão")
+    with cols2[1]: kpi("IRRF + IOF identificados",fmt_brl(complete_data["IR + IOF (custo)"].sum()))
+    with cols2[2]: kpi("Taxas de gestão identificadas",fmt_brl(complete_data["Taxa gestão (custo)"].sum()))
+    with cols2[3]: kpi("Cashback contabilizado",fmt_brl(complete_data["Cashback lançado"].sum()),"Já incluído no ganho líquido")
+    st.caption(f"Rentabilidade Modified Dietz: **líquida {rate:.4f}%** · **bruta ajustada {rate_bruto:.4f}%** (aproximações; o cálculo bruto pressupõe custos lançados no período).")
 
-view = summary[["Conta", "PL inicial", "PL final", "Fluxo líquido", "Ganho financeiro", "Modified Dietz (%)", "Status"]].copy()
-st.dataframe(view.style.format({"PL inicial":fmt_brl,"PL final":fmt_brl,"Fluxo líquido":fmt_brl,"Ganho financeiro":fmt_brl,"Modified Dietz (%)":lambda v: f"{v:.4f}%" if pd.notna(v) else "—"}), use_container_width=True, hide_index=True)
+view_cols = ["Conta", "PL inicial", "PL final", "Fluxo líquido", "Ganho financeiro", "IR + IOF (custo)", "Taxa gestão (custo)", "Cashback lançado", "Ganho bruto (antes IR e gestão)", "Modified Dietz (%)", "Retorno bruto Dietz (%)", "Status"]
+view = summary[view_cols].copy()
+fmts={c:fmt_brl for c in ["PL inicial", "PL final", "Fluxo líquido", "Ganho financeiro", "IR + IOF (custo)", "Taxa gestão (custo)", "Cashback lançado", "Ganho bruto (antes IR e gestão)"]}
+fmts.update({c:(lambda v: f"{v:.4f}%" if pd.notna(v) else "—") for c in ["Modified Dietz (%)", "Retorno bruto Dietz (%)"]})
+st.dataframe(view.style.format(fmts), use_container_width=True, hide_index=True)
 
-st.subheader("3. Validações e exportação")
+st.subheader("3. Comparação com apuração XP / controle manual")
+st.caption("Referência opcional para conferência. A comparação não altera o resultado calculado. Digite o ganho anotado para cada conta e escolha o critério de comparação.")
+bench_defaults = {"9445242":339.27,"5166121":110215.15,"4163084":46839.88,"11370136":32549.55,"7983962":103587.85}
+bench = pd.DataFrame({"Conta":summary["Conta"],"Ganho de referência (R$)":[bench_defaults.get(acc, float("nan")) if year==2026 and month==10 else float("nan") for acc in summary["Conta"]]})
+bench_edit = st.data_editor(bench, hide_index=True, use_container_width=True,
+    disabled=["Conta"],column_config={"Ganho de referência (R$)":st.column_config.NumberColumn("Ganho de referência (R$)",format="%.2f")},
+    key=f"bench_{year}_{month}")
+criterion = st.radio("Comparar referência com",["Ganho bruto (antes IR e gestão)","Ganho financeiro"],horizontal=True,
+    format_func=lambda v:"Bruto (antes de IR e gestão)" if v.startswith("Ganho bruto") else "Líquido (após IR e gestão)")
+compare = summary[["Conta","Ganho financeiro","Ganho bruto (antes IR e gestão)","IR + IOF (custo)","Taxa gestão (custo)","Cashback lançado"]].merge(bench_edit,on="Conta",how="left")
+compare["Diferença (app - referência)"]=compare[criterion]-compare["Ganho de referência (R$)"]
+st.dataframe(compare.style.format({c:fmt_brl for c in compare.columns if c!="Conta"}),hide_index=True,use_container_width=True)
+if compare["Diferença (app - referência)"].abs().gt(1).any():
+    discrepant=compare.loc[compare["Diferença (app - referência)"].abs()>1,["Conta","Diferença (app - referência)"]]
+    st.warning("Existem diferenças superiores a R$ 1,00: " + "; ".join(f"conta {r['Conta']}: {fmt_brl(r['Diferença (app - referência)'])}" for _,r in discrepant.iterrows()) + ". Confira a natureza dos lançamentos, eventuais IRs não refletidos no extrato e os critérios de apuração XP.")
+
+st.subheader("4. Validações e exportação")
 checks = pd.DataFrame([
     {"Verificação": "Contas sem PL completo", "Resultado": ", ".join(summary.loc[~complete,"Conta"]) or "Nenhuma"},
     {"Verificação": "Movimentações pendentes de classificação", "Resultado": str(int(m["Classificação"].eq("Revisar").sum()))},
@@ -315,6 +391,8 @@ checks = pd.DataFrame([
     {"Verificação": "Extrato: última data de liquidação", "Resultado": str(movements["Data liquidação"].max().date())},
     {"Verificação": "Data usada para fluxos", "Resultado": flow_date_type},
     {"Verificação": "Ganho consolidado = PL final - PL inicial - fluxos", "Resultado": fmt_brl(complete_data["Ganho financeiro"].sum())},
+    {"Verificação": "Ganho bruto = líquido + impostos + taxa gestão", "Resultado": fmt_brl(complete_data["Ganho bruto (antes IR e gestão)"].sum())},
+    {"Verificação": "Cashback (já incluso no ganho)", "Resultado": fmt_brl(complete_data["Cashback lançado"].sum())},
 ])
 
 last_mov_day = m["Data apuração"].max()
@@ -328,6 +406,10 @@ notes = pd.DataFrame({"Metodologia / alertas": [
     "Ganho = PL final - PL inicial - soma dos fluxos externos assinados (positivo=aporte; negativo=retirada).",
     "Modified Dietz = ganho / [PL inicial + soma(fluxo externo * (dias até fim do mês / dias do período))].",
     "Modified Dietz é uma aproximação de retorno, não TWR exato. O valor do ganho não depende do Modified Dietz.",
+    "Ganho líquido reflete IRRF, IOF, taxas de gestão e cashback quando integrados aos patrimônios de abertura e fechamento.",
+    "Ganho bruto ajustado = ganho líquido + IRRF + IOF + taxa de gestão debitados no mês e identificados no extrato.",
+    "Cashback/devolução de distribuição é receita da conta e já está no PL final; não somar novamente ao ganho.",
+    "Se quiser rentabilidade antes também do efeito do cashback, subtraia a devolução do ganho bruto, apenas como análise adicional.",
     "Transferências entre contas do próprio grupo devem ser classificadas como fluxo externo nas contas individuais se saírem/entrarem no PL, mesmo que no consolidado se anulem.",
     "Aplicações, resgates e recompras de investimentos dentro da mesma conta NÃO são fluxos externos.",
     "Os PLs inicial/final devem estar no mesmo critério (bruto/líquido) e representar os respectivos fechamentos.",
@@ -343,11 +425,16 @@ if len(complete_data):
         "PL final": end_sum,
         "Fluxo líquido": flows,
         "Ganho financeiro": g,
+        "IR + IOF (custo)": complete_data["IR + IOF (custo)"].sum(),
+        "Taxa gestão (custo)": complete_data["Taxa gestão (custo)"].sum(),
+        "Cashback lançado": complete_data["Cashback lançado"].sum(),
+        "Ganho bruto (antes IR e gestão)": g_bruto,
         "Modified Dietz (%)": rate,
+        "Retorno bruto Dietz (%)": rate_bruto,
         "Status": "OK" if complete.all() and not m["Classificação"].eq("Revisar").any() and not len(wrong_sign) else "PRELIMINAR",
     }
     export_view = pd.concat([export_view, pd.DataFrame([consolidated_row])], ignore_index=True)
-out = result_book(export_view, m, pl.sort_values(["Data", "Conta"]), checks, notes)
+out = result_book(export_view, m, pl.sort_values(["Data", "Conta"]), checks, notes, compare)
 st.download_button("⬇️ Baixar apuração consolidada e memória de cálculo (.xlsx)",
                    data=out, file_name=f"conciliacao_xp_{year}_{month:02d}.xlsx",
                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
